@@ -1,0 +1,1395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+  >
+
+  <title>Balayya Flight</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #160811;
+      touch-action: none;
+      overscroll-behavior: none;
+    }
+
+    #game-container {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    canvas {
+      display: block;
+      touch-action: none;
+    }
+  </style>
+
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+</head>
+
+<body>
+  <div id="game-container"></div>
+
+  <script>
+    "use strict";
+
+    /*
+     * ================================================================
+     * CONFIGURATION
+     * ================================================================
+     *
+     * Change GAMEOVER_MESSAGE to display your own message.
+     * Change the file paths below if your images or audio use different names.
+     */
+    const CONFIG = {
+      WIDTH: 540,
+      HEIGHT: 960,
+      GROUND_HEIGHT: 112,
+
+      HERO_X: 145,
+      HERO_START_Y: 420,
+      HERO_WIDTH: 76,
+      HERO_HEIGHT: 56,
+
+      GRAVITY: 1450,
+      FLAP_VELOCITY: -490,
+      MAX_FALL_SPEED: 780,
+
+      PILLAR_WIDTH: 88,
+      PILLAR_HEIGHT: 800,
+      OBSTACLE_SPACING: 335,
+      FIRST_OBSTACLE_DISTANCE: 400,
+
+      START_SPEED: 240,
+      MAX_SPEED: 420,
+      SPEED_INCREASE_PER_SCORE: 4.5,
+
+      START_GAP: 215,
+      MIN_GAP: 155,
+      GAP_DECREASE_PER_SCORE: 1.6,
+      GAP_MARGIN_TOP: 110,
+      GAP_MARGIN_BOTTOM: 110,
+
+      PIXELS_PER_METER: 60,
+
+      PARALLAX: {
+        SKY: 0.12,
+        MOUNTAINS: 0.38,
+        GROUND: 1.0
+      },
+
+      FADE_DURATION: 280,
+
+      AUDIO: {
+        FLAP_VOLUME: 0.85,
+        MUSIC_VOLUME: 0.45,
+        GAMEOVER_VOLUME: 0.9,
+        FLAP_RATE_MIN: 0.95,
+        FLAP_RATE_MAX: 1.05
+      },
+
+      // Change this to your own message.
+      GAMEOVER_MESSAGE: "Pilla mogga eei game guda raadara niku chiii Try again!",
+
+      ASSETS: {
+        HERO: "assets/hero.png",
+        PILLAR: "assets/pillar.png",
+        SKY: "assets/bg_sky.png",
+        MOUNTAINS: "assets/bg_mountains.png",
+        GROUND: "assets/bg_ground.png",
+
+        // Your image displayed on the game-over screen.
+        GAMEOVER_IMAGE: "assets/gameover.png",
+
+        FLAP: "assets/flap.mp3",
+        MUSIC: "assets/music.mp3",
+        GAMEOVER_AUDIO: "assets/gameover.mp3"
+      },
+
+      STORAGE: {
+        BEST_SCORE: "balayya_flight_best_score",
+        BEST_DISTANCE: "balayya_flight_best_distance",
+        MUTED: "balayya_flight_muted"
+      },
+
+      FOOTER:
+        "Fan-made game. Not affiliated with or endorsed by any actor or film."
+    };
+
+    /*
+     * ================================================================
+     * STORAGE
+     * ================================================================
+     *
+     * The game still runs if localStorage is unavailable, although records
+     * will only be kept in memory for the current page session.
+     */
+    const Storage = {
+      memory: {},
+
+      get(key, fallback) {
+        try {
+          const value = localStorage.getItem(key);
+          if (value !== null) return value;
+        } catch (error) {
+          // Storage may be blocked by the browser.
+        }
+
+        return this.memory[key] ?? fallback;
+      },
+
+      set(key, value) {
+        const stringValue = String(value);
+        this.memory[key] = stringValue;
+
+        try {
+          localStorage.setItem(key, stringValue);
+        } catch (error) {
+          // Keep the in-memory value.
+        }
+      },
+
+      bestScore() {
+        return Number(this.get(CONFIG.STORAGE.BEST_SCORE, 0)) || 0;
+      },
+
+      bestDistance() {
+        return Number(this.get(CONFIG.STORAGE.BEST_DISTANCE, 0)) || 0;
+      },
+
+      isMuted() {
+        return this.get(CONFIG.STORAGE.MUTED, "false") === "true";
+      },
+
+      setMuted(value) {
+        this.set(CONFIG.STORAGE.MUTED, value);
+      }
+    };
+
+    /*
+     * ================================================================
+     * AUDIO
+     * ================================================================
+     *
+     * Each flap creates a separate sound instance, allowing rapid sounds
+     * to overlap. Missing audio files are safely ignored.
+     */
+    const AudioManager = {
+      game: null,
+      music: null,
+
+      init(game) {
+        this.game = game;
+        game.sound.mute = Storage.isMuted();
+      },
+
+      unlock() {
+        if (!this.game || !this.game.sound) return;
+
+        const sound = this.game.sound;
+        const context = sound.context;
+
+        if (context && context.state === "suspended") {
+          context.resume().catch(() => {});
+        }
+
+        // Phaser also listens for browser gestures to unlock audio.
+        if (sound.locked && typeof sound.unlock === "function") {
+          sound.unlock();
+        }
+      },
+
+      playFlap() {
+        if (!this.game || !this.game.cache.audio.exists("flap")) return;
+
+        const sound = this.game.sound.add("flap", {
+          volume: CONFIG.AUDIO.FLAP_VOLUME,
+          rate: Phaser.Math.FloatBetween(
+            CONFIG.AUDIO.FLAP_RATE_MIN,
+            CONFIG.AUDIO.FLAP_RATE_MAX
+          )
+        });
+
+        sound.once("complete", () => sound.destroy());
+
+        if (!sound.play()) {
+          sound.destroy();
+        }
+      },
+
+      startMusic() {
+        if (!this.game || !this.game.cache.audio.exists("music")) return;
+
+        if (!this.music) {
+          this.music = this.game.sound.add("music", {
+            loop: true,
+            volume: CONFIG.AUDIO.MUSIC_VOLUME
+          });
+        }
+
+        if (!this.music.isPlaying) {
+          this.music.play();
+        }
+      },
+
+      stopMusic() {
+        if (this.music && this.music.isPlaying) {
+          this.music.stop();
+        }
+      },
+
+      playGameOver() {
+        this.stopMusic();
+
+        if (!this.game || !this.game.cache.audio.exists("gameover_audio")) {
+          return;
+        }
+
+        const sound = this.game.sound.add("gameover_audio", {
+          volume: CONFIG.AUDIO.GAMEOVER_VOLUME
+        });
+
+        sound.once("complete", () => sound.destroy());
+
+        if (!sound.play()) {
+          sound.destroy();
+        }
+      },
+
+      toggleMute() {
+        const muted = !Storage.isMuted();
+        Storage.setMuted(muted);
+
+        if (this.game) {
+          this.game.sound.mute = muted;
+        }
+
+        return muted;
+      }
+    };
+
+    /*
+     * ================================================================
+     * SHARED HELPERS
+     * ================================================================
+     */
+
+    function addBackground(scene) {
+      const groundTop = CONFIG.HEIGHT - CONFIG.GROUND_HEIGHT;
+
+      const sky = scene.add.tileSprite(
+        0, 0,
+        CONFIG.WIDTH, CONFIG.HEIGHT,
+        "bg_sky"
+      ).setOrigin(0).setDepth(0);
+
+      const mountains = scene.add.tileSprite(
+        0, groundTop - 360,
+        CONFIG.WIDTH, 360,
+        "bg_mountains"
+      ).setOrigin(0).setDepth(1);
+
+      const ground = scene.add.tileSprite(
+        0, groundTop,
+        CONFIG.WIDTH, CONFIG.GROUND_HEIGHT,
+        "bg_ground"
+      ).setOrigin(0).setDepth(20);
+
+      return { sky, mountains, ground };
+    }
+
+    function scrollBackground(background, pixels) {
+      background.sky.tilePositionX += pixels * CONFIG.PARALLAX.SKY;
+      background.mountains.tilePositionX += pixels * CONFIG.PARALLAX.MOUNTAINS;
+      background.ground.tilePositionX += pixels * CONFIG.PARALLAX.GROUND;
+    }
+
+    function addFooter(scene) {
+      scene.add.text(
+        CONFIG.WIDTH / 2,
+        CONFIG.HEIGHT - 15,
+        CONFIG.FOOTER,
+        {
+          fontFamily: "Arial, sans-serif",
+          fontSize: "12px",
+          color: "#ffe6a7",
+          stroke: "#000000",
+          strokeThickness: 3,
+          align: "center"
+        }
+      ).setOrigin(0.5).setDepth(100);
+    }
+
+    function addMuteButton(scene) {
+      const button = scene.add.container(CONFIG.WIDTH - 43, 43)
+        .setDepth(100);
+
+      const background = scene.add.circle(0, 0, 27, 0x1a0b08, 0.9)
+        .setStrokeStyle(3, 0xffb703);
+
+      const label = scene.add.text(
+        0, 0,
+        Storage.isMuted() ? "OFF" : "ON",
+        {
+          fontFamily: "Arial, sans-serif",
+          fontStyle: "bold",
+          fontSize: "16px",
+          color: "#ffffff"
+        }
+      ).setOrigin(0.5);
+
+      button.add([background, label]);
+      button.setSize(54, 54);
+      button.setInteractive({ useHandCursor: true });
+
+      button.on("pointerdown", (pointer, x, y, event) => {
+        event.stopPropagation();
+
+        const muted = AudioManager.toggleMute();
+        label.setText(muted ? "OFF" : "ON");
+      });
+
+      return button;
+    }
+
+    function addButton(scene, x, y, text, callback) {
+      const button = scene.add.container(x, y).setDepth(50);
+
+      const background = scene.add.rectangle(
+        0, 0, 290, 74, 0xd62828
+      ).setStrokeStyle(4, 0xffd166);
+
+      const label = scene.add.text(0, 0, text, {
+        fontFamily: "Impact, Arial Black, sans-serif",
+        fontSize: "36px",
+        color: "#ffffff",
+        stroke: "#000000",
+        strokeThickness: 5
+      }).setOrigin(0.5);
+
+      button.add([background, label]);
+      button.setSize(290, 74);
+      button.setInteractive({ useHandCursor: true });
+
+      button.on("pointerdown", (pointer, x, y, event) => {
+        event.stopPropagation();
+        callback();
+      });
+
+      scene.tweens.add({
+        targets: button,
+        scale: 1.05,
+        duration: 650,
+        yoyo: true,
+        repeat: -1,
+        ease: "Sine.easeInOut"
+      });
+
+      return button;
+    }
+
+    function fadeToScene(scene, key, data) {
+      if (scene.transitioning) return;
+
+      scene.transitioning = true;
+
+      scene.cameras.main.fadeOut(
+        CONFIG.FADE_DURATION,
+        0, 0, 0
+      );
+
+      scene.cameras.main.once(
+        Phaser.Cameras.Scene2D.Events.FADE_OUT_COMPLETE,
+        () => scene.scene.start(key, data)
+      );
+    }
+
+    /*
+     * ================================================================
+     * BOOT SCENE
+     * ================================================================
+     *
+     * Loads optional files and generates placeholder graphics for any
+     * images that are missing.
+     */
+    class BootScene extends Phaser.Scene {
+      constructor() {
+        super("BootScene");
+      }
+
+      preload() {
+        this.load.image("hero", CONFIG.ASSETS.HERO);
+        this.load.image("pillar", CONFIG.ASSETS.PILLAR);
+        this.load.image("bg_sky", CONFIG.ASSETS.SKY);
+        this.load.image("bg_mountains", CONFIG.ASSETS.MOUNTAINS);
+        this.load.image("bg_ground", CONFIG.ASSETS.GROUND);
+        this.load.image("gameover_image", CONFIG.ASSETS.GAMEOVER_IMAGE);
+
+        this.load.audio("flap", CONFIG.ASSETS.FLAP);
+        this.load.audio("music", CONFIG.ASSETS.MUSIC);
+        this.load.audio("gameover_audio", CONFIG.ASSETS.GAMEOVER_AUDIO);
+      }
+
+      create() {
+        AudioManager.init(this.game);
+        this.createPlaceholders();
+        this.scene.start("MenuScene");
+      }
+
+      createPlaceholders() {
+        // Sky
+        if (!this.textures.exists("bg_sky")) {
+          const g = this.make.graphics({ x: 0, y: 0, add: false });
+
+          g.fillGradientStyle(
+            0x220929, 0x220929,
+            0xd05a35, 0xd05a35,
+            1
+          );
+          g.fillRect(0, 0, 540, 960);
+
+          g.fillStyle(0xffc66d, 0.25);
+          g.fillCircle(390, 300, 100);
+
+          g.fillStyle(0xffd5a0, 0.12);
+          g.fillEllipse(120, 180, 180, 35);
+          g.fillEllipse(380, 210, 210, 40);
+          g.fillEllipse(260, 360, 160, 30);
+
+          g.generateTexture("bg_sky", 540, 960);
+          g.destroy();
+        }
+
+        // Mountains and temple silhouettes
+        if (!this.textures.exists("bg_mountains")) {
+          const g = this.make.graphics({ x: 0, y: 0, add: false });
+
+          g.fillStyle(0x46152d, 1);
+          g.fillPoints([
+            { x: 0, y: 360 },
+            { x: 0, y: 220 },
+            { x: 80, y: 120 },
+            { x: 160, y: 210 },
+            { x: 250, y: 90 },
+            { x: 350, y: 220 },
+            { x: 445, y: 115 },
+            { x: 540, y: 220 },
+            { x: 540, y: 360 }
+          ], true);
+
+          g.fillStyle(0x270b1b, 1);
+          g.fillPoints([
+            { x: 0, y: 360 },
+            { x: 0, y: 275 },
+            { x: 100, y: 240 },
+            { x: 120, y: 240 },
+            { x: 135, y: 150 },
+            { x: 160, y: 150 },
+            { x: 175, y: 240 },
+            { x: 290, y: 260 },
+            { x: 375, y: 220 },
+            { x: 395, y: 140 },
+            { x: 420, y: 140 },
+            { x: 440, y: 220 },
+            { x: 540, y: 280 },
+            { x: 540, y: 360 }
+          ], true);
+
+          g.generateTexture("bg_mountains", 540, 360);
+          g.destroy();
+        }
+
+        // Ground
+        if (!this.textures.exists("bg_ground")) {
+          const g = this.make.graphics({ x: 0, y: 0, add: false });
+
+          g.fillStyle(0x32150e, 1);
+          g.fillRect(0, 0, 540, CONFIG.GROUND_HEIGHT);
+
+          g.fillStyle(0xffb703, 1);
+          g.fillRect(0, 0, 540, 8);
+
+          g.fillStyle(0xa44a28, 1);
+          g.fillRect(0, 8, 540, 16);
+
+          g.fillStyle(0x522317, 1);
+          for (let x = 0; x < 540; x += 60) {
+            g.fillRect(x + 4, 34, 50, 22);
+            g.fillRect(x + 14, 66, 42, 26);
+          }
+
+          g.generateTexture("bg_ground", 540, CONFIG.GROUND_HEIGHT);
+          g.destroy();
+        }
+
+        // Stone pillar
+        if (!this.textures.exists("pillar")) {
+          const g = this.make.graphics({ x: 0, y: 0, add: false });
+
+          const w = CONFIG.PILLAR_WIDTH;
+          const h = CONFIG.PILLAR_HEIGHT;
+
+          g.fillStyle(0x663320, 1);
+          g.fillRect(6, 0, w - 12, h);
+
+          g.fillStyle(0xa95d3b, 1);
+          g.fillRect(18, 0, w - 40, h);
+
+          for (let y = 35; y < h; y += 65) {
+            g.fillStyle(0x3d1c10, 1);
+            g.fillRect(6, y, w - 12, 10);
+
+            g.fillStyle(0xffb703, 1);
+            g.fillRect(10, y + 3, w - 20, 4);
+          }
+
+          g.fillStyle(0x7d3f26, 1);
+          g.fillRect(0, 0, w, 30);
+          g.fillRect(0, h - 30, w, 30);
+
+          g.lineStyle(3, 0xffb703, 1);
+          g.strokeRect(2, 2, w - 4, 26);
+          g.strokeRect(2, h - 28, w - 4, 26);
+
+          g.generateTexture("pillar", w, h);
+          g.destroy();
+        }
+
+        // Placeholder hero
+        if (!this.textures.exists("hero")) {
+          const g = this.make.graphics({ x: 0, y: 0, add: false });
+
+          g.fillStyle(0xffb703, 0.25);
+          g.fillEllipse(44, 32, 78, 50);
+
+          // Red cape
+          g.fillStyle(0xd62828, 1);
+          g.fillTriangle(32, 25, 2, 18, 10, 46);
+
+          // Body
+          g.fillStyle(0xfff8eb, 1);
+          g.fillRoundedRect(24, 25, 34, 22, 7);
+
+          // Head and fist
+          g.fillStyle(0xe09f67, 1);
+          g.fillCircle(54, 24, 15);
+          g.fillCircle(75, 32, 7);
+
+          // Hair and sunglasses
+          g.fillStyle(0x1f130e, 1);
+          g.fillEllipse(51, 15, 29, 14);
+          g.fillRect(53, 19, 14, 7);
+
+          // Mustache
+          g.fillRect(54, 30, 13, 3);
+
+          g.generateTexture("hero", 88, 64);
+          g.destroy();
+        }
+
+        // Spark particle
+        if (!this.textures.exists("spark")) {
+          const g = this.make.graphics({ x: 0, y: 0, add: false });
+
+          g.fillStyle(0xff7b00, 0.35);
+          g.fillCircle(12, 12, 11);
+
+          g.fillStyle(0xffd166, 1);
+          g.fillCircle(12, 12, 7);
+
+          g.fillStyle(0xffffff, 1);
+          g.fillCircle(12, 12, 3);
+
+          g.generateTexture("spark", 24, 24);
+          g.destroy();
+        }
+      }
+    }
+
+    /*
+     * ================================================================
+     * MENU SCENE
+     * ================================================================
+     */
+    class MenuScene extends Phaser.Scene {
+      constructor() {
+        super("MenuScene");
+      }
+
+      create() {
+        this.transitioning = false;
+        this.background = addBackground(this);
+
+        this.cameras.main.fadeIn(CONFIG.FADE_DURATION, 0, 0, 0);
+
+        this.add.text(CONFIG.WIDTH / 2, 115, "★ MASS ACTION ARCADE ★", {
+          fontFamily: "Arial, sans-serif",
+          fontStyle: "bold",
+          fontSize: "20px",
+          color: "#ffd166",
+          stroke: "#000000",
+          strokeThickness: 4
+        }).setOrigin(0.5);
+
+        const title = this.add.text(
+          CONFIG.WIDTH / 2,
+          205,
+          "BALAYYA\nFLIGHT",
+          {
+            fontFamily: "Impact, Arial Black, sans-serif",
+            fontSize: "68px",
+            color: "#ffb703",
+            align: "center",
+            stroke: "#3d0c02",
+            strokeThickness: 12,
+            lineSpacing: -8
+          }
+        ).setOrigin(0.5);
+
+        this.tweens.add({
+          targets: title,
+          y: "+=6",
+          duration: 1300,
+          yoyo: true,
+          repeat: -1,
+          ease: "Sine.easeInOut"
+        });
+
+        const hero = this.add.image(CONFIG.WIDTH / 2, 390, "hero")
+          .setDisplaySize(CONFIG.HERO_WIDTH * 1.3, CONFIG.HERO_HEIGHT * 1.3)
+          .setDepth(10);
+
+        this.tweens.add({
+          targets: hero,
+          y: 370,
+          angle: -8,
+          duration: 700,
+          yoyo: true,
+          repeat: -1,
+          ease: "Sine.easeInOut"
+        });
+
+        this.add.rectangle(
+          CONFIG.WIDTH / 2, 535, 390, 125, 0x1a0805, 0.85
+        ).setStrokeStyle(3, 0xffb703).setDepth(5);
+
+        this.add.text(
+          CONFIG.WIDTH / 2, 510,
+          `BEST SCORE: ${Storage.bestScore()}`,
+          {
+            fontFamily: "Impact, Arial, sans-serif",
+            fontSize: "28px",
+            color: "#ffffff"
+          }
+        ).setOrigin(0.5).setDepth(6);
+
+        this.add.text(
+          CONFIG.WIDTH / 2, 555,
+          `BEST DISTANCE: ${Storage.bestDistance()} m`,
+          {
+            fontFamily: "Impact, Arial, sans-serif",
+            fontSize: "25px",
+            color: "#ffd166"
+          }
+        ).setOrigin(0.5).setDepth(6);
+
+        addButton(this, CONFIG.WIDTH / 2, 695, "TAP TO PLAY", () => {
+          this.startGame();
+        });
+
+        this.add.text(
+          CONFIG.WIDTH / 2, 765,
+          "Tap, click, or press SPACE to flap",
+          {
+            fontFamily: "Arial, sans-serif",
+            fontSize: "17px",
+            color: "#ffe6a7",
+            stroke: "#000000",
+            strokeThickness: 3
+          }
+        ).setOrigin(0.5).setDepth(30);
+
+        addMuteButton(this);
+        addFooter(this);
+
+        if (this.input.keyboard) {
+          this.input.keyboard.on("keydown-SPACE", event => {
+            if (!event.repeat) this.startGame();
+          });
+        }
+      }
+
+      startGame() {
+        if (this.transitioning) return;
+
+        AudioManager.startMusic();
+        fadeToScene(this, "GameScene");
+      }
+
+      update(time, delta) {
+        scrollBackground(this.background, 150 * delta / 1000);
+      }
+    }
+
+    /*
+     * ================================================================
+     * GAME SCENE
+     * ================================================================
+     */
+    class GameScene extends Phaser.Scene {
+      constructor() {
+        super("GameScene");
+      }
+
+      create() {
+        this.transitioning = false;
+        this.dead = false;
+
+        this.score = 0;
+        this.distance = 0;
+        this.pixelsScrolled = 0;
+        this.distanceToSpawn = CONFIG.FIRST_OBSTACLE_DISTANCE;
+
+        this.speed = CONFIG.START_SPEED;
+        this.gap = CONFIG.START_GAP;
+
+        this.groundTop = CONFIG.HEIGHT - CONFIG.GROUND_HEIGHT;
+
+        this.background = addBackground(this);
+
+        this.cameras.main.fadeIn(CONFIG.FADE_DURATION, 0, 0, 0);
+
+        this.pairs = [];
+
+        this.obstacles = this.physics.add.group({
+          allowGravity: false,
+          immovable: true
+        });
+
+        this.particles = this.add.particles(0, 0, "spark", {
+          speed: { min: 65, max: 200 },
+          angle: { min: 130, max: 230 },
+          scale: { start: 0.8, end: 0 },
+          alpha: { start: 1, end: 0 },
+          lifespan: { min: 250, max: 450 },
+          emitting: false,
+          blendMode: "ADD"
+        }).setDepth(8);
+
+        this.hero = this.physics.add.sprite(
+          CONFIG.HERO_X,
+          CONFIG.HERO_START_Y,
+          "hero"
+        );
+
+        this.hero
+          .setDisplaySize(CONFIG.HERO_WIDTH, CONFIG.HERO_HEIGHT)
+          .setDepth(10);
+
+        this.hero.body.setGravityY(CONFIG.GRAVITY);
+        this.hero.body.setMaxVelocityY(CONFIG.MAX_FALL_SPEED);
+
+        // A slightly smaller hitbox makes near-misses feel fair.
+        this.hero.body.setSize(
+          this.hero.width * 0.68,
+          this.hero.height * 0.68,
+          true
+        );
+
+        this.scoreText = this.add.text(24, 24, "Score: 0", {
+          fontFamily: "Impact, Arial Black, sans-serif",
+          fontSize: "38px",
+          color: "#ffffff",
+          stroke: "#2b0904",
+          strokeThickness: 7
+        }).setDepth(50);
+
+        this.distanceText = this.add.text(24, 72, "Distance: 0 m", {
+          fontFamily: "Impact, Arial, sans-serif",
+          fontSize: "26px",
+          color: "#ffd166",
+          stroke: "#2b0904",
+          strokeThickness: 5
+        }).setDepth(50);
+
+        addMuteButton(this);
+        addFooter(this);
+
+        this.physics.add.overlap(
+          this.hero,
+          this.obstacles,
+          () => this.die()
+        );
+
+        this.input.on("pointerdown", () => {
+          if (!this.dead) this.flap();
+        });
+
+        if (this.input.keyboard) {
+          this.input.keyboard.on("keydown-SPACE", event => {
+            if (!event.repeat && !this.dead) this.flap();
+          });
+        }
+
+        // The initial flap corresponds to the tap that started the game.
+        this.flap();
+      }
+
+      flap() {
+        if (this.dead) return;
+
+        this.hero.setVelocityY(CONFIG.FLAP_VELOCITY);
+        this.hero.setAngle(-26);
+
+        // Brief squash/stretch flap animation.
+        this.tweens.killTweensOf(this.hero);
+        this.hero.setDisplaySize(
+          CONFIG.HERO_WIDTH * 1.08,
+          CONFIG.HERO_HEIGHT * 0.94
+        );
+
+        this.tweens.add({
+          targets: this.hero,
+          displayWidth: CONFIG.HERO_WIDTH,
+          displayHeight: CONFIG.HERO_HEIGHT,
+          duration: 130
+        });
+
+        this.particles.explode(
+          12,
+          this.hero.x - 24,
+          this.hero.y + 8
+        );
+      }
+
+      spawnPair() {
+        const spawnX = CONFIG.WIDTH + CONFIG.PILLAR_WIDTH;
+        const halfGap = this.gap / 2;
+
+        const minCenter = CONFIG.GAP_MARGIN_TOP + halfGap;
+        const maxCenter =
+          this.groundTop - CONFIG.GAP_MARGIN_BOTTOM - halfGap;
+
+        const gapCenter = Phaser.Math.Between(
+          Math.ceil(minCenter),
+          Math.floor(maxCenter)
+        );
+
+        const top = this.obstacles.create(
+          spawnX,
+          gapCenter - halfGap - CONFIG.PILLAR_HEIGHT / 2,
+          "pillar"
+        );
+
+        const bottom = this.obstacles.create(
+          spawnX,
+          gapCenter + halfGap + CONFIG.PILLAR_HEIGHT / 2,
+          "pillar"
+        );
+
+        top.setDisplaySize(CONFIG.PILLAR_WIDTH, CONFIG.PILLAR_HEIGHT);
+        bottom.setDisplaySize(CONFIG.PILLAR_WIDTH, CONFIG.PILLAR_HEIGHT);
+
+        top.setFlipY(true);
+        top.setDepth(5);
+        bottom.setDepth(5);
+
+        top.body.setSize(top.width * 0.86, top.height, true);
+        bottom.body.setSize(bottom.width * 0.86, bottom.height, true);
+
+        this.pairs.push({
+          top,
+          bottom,
+          scored: false
+        });
+      }
+
+      addScore() {
+        this.score++;
+
+        this.scoreText.setText(`Score: ${this.score}`);
+
+        this.tweens.killTweensOf(this.scoreText);
+        this.scoreText.setScale(1.3);
+
+        this.tweens.add({
+          targets: this.scoreText,
+          scale: 1,
+          duration: 220,
+          ease: "Back.easeOut"
+        });
+
+        this.speed = Math.min(
+          CONFIG.MAX_SPEED,
+          CONFIG.START_SPEED +
+            this.score * CONFIG.SPEED_INCREASE_PER_SCORE
+        );
+
+        this.gap = Math.max(
+          CONFIG.MIN_GAP,
+          CONFIG.START_GAP -
+            this.score * CONFIG.GAP_DECREASE_PER_SCORE
+        );
+      }
+
+      die() {
+        if (this.dead) return;
+
+        this.dead = true;
+
+        AudioManager.playGameOver();
+
+        this.cameras.main.shake(320, 0.024);
+        this.cameras.main.flash(260, 255, 35, 35);
+
+        this.tweens.killTweensOf(this.hero);
+        this.hero.setDisplaySize(CONFIG.HERO_WIDTH, CONFIG.HERO_HEIGHT);
+        this.hero.setTint(0xff6b6b);
+        this.hero.setDepth(30);
+        this.hero.setVelocityY(-260);
+
+        // Safety fallback if the hero never reaches the bottom of the screen.
+        this.time.delayedCall(3000, () => this.showGameOver());
+      }
+
+      showGameOver() {
+        if (this.transitioning) return;
+
+        fadeToScene(this, "GameOverScene", {
+          score: this.score,
+          distance: this.distance
+        });
+      }
+
+      update(time, delta) {
+        const dt = delta / 1000;
+
+        if (this.dead) {
+          this.hero.angle = Math.min(90, this.hero.angle + 260 * dt);
+
+          if (this.hero.y > CONFIG.HEIGHT + 60) {
+            this.showGameOver();
+          }
+
+          return;
+        }
+
+        if (
+          this.hero.body.top <= 0 ||
+          this.hero.body.bottom >= this.groundTop
+        ) {
+          this.die();
+          return;
+        }
+
+        const velocity = this.hero.body.velocity.y;
+
+        if (velocity > 40) {
+          const amount = Phaser.Math.Clamp(
+            (velocity - 40) / (CONFIG.MAX_FALL_SPEED - 40),
+            0,
+            1
+          );
+
+          this.hero.angle = Phaser.Math.Linear(-26, 80, amount);
+        } else {
+          this.hero.angle = Phaser.Math.Linear(this.hero.angle, -26, 0.25);
+        }
+
+        const step = this.speed * dt;
+
+        scrollBackground(this.background, step);
+
+        this.pixelsScrolled += step;
+
+        const distance = Math.floor(
+          this.pixelsScrolled / CONFIG.PIXELS_PER_METER
+        );
+
+        if (distance !== this.distance) {
+          this.distance = distance;
+          this.distanceText.setText(`Distance: ${this.distance} m`);
+        }
+
+        this.distanceToSpawn -= step;
+
+        while (this.distanceToSpawn <= 0) {
+          this.spawnPair();
+          this.distanceToSpawn += CONFIG.OBSTACLE_SPACING;
+        }
+
+        for (let i = this.pairs.length - 1; i >= 0; i--) {
+          const pair = this.pairs[i];
+
+          pair.top.x -= step;
+          pair.bottom.x -= step;
+
+          if (
+            !pair.scored &&
+            pair.top.x + CONFIG.PILLAR_WIDTH / 2 < this.hero.x
+          ) {
+            pair.scored = true;
+            this.addScore();
+          }
+
+          if (pair.top.x < -CONFIG.PILLAR_WIDTH) {
+            pair.top.destroy();
+            pair.bottom.destroy();
+            this.pairs.splice(i, 1);
+          }
+        }
+      }
+    }
+
+    /*
+     * ================================================================
+     * GAME OVER SCENE
+     * ================================================================
+     *
+     * Displays your gameover.png image and GAMEOVER_MESSAGE.
+     */
+    class GameOverScene extends Phaser.Scene {
+      constructor() {
+        super("GameOverScene");
+      }
+
+      init(data) {
+        this.finalScore = data.score || 0;
+        this.finalDistance = data.distance || 0;
+      }
+
+      create() {
+        this.transitioning = false;
+        this.canRestart = false;
+
+        this.background = addBackground(this);
+
+        this.cameras.main.fadeIn(CONFIG.FADE_DURATION, 0, 0, 0);
+
+        this.add.rectangle(
+          CONFIG.WIDTH / 2,
+          CONFIG.HEIGHT / 2,
+          CONFIG.WIDTH,
+          CONFIG.HEIGHT,
+          0x0d0402,
+          0.7
+        ).setDepth(21);
+
+        const previousBestScore = Storage.bestScore();
+        const previousBestDistance = Storage.bestDistance();
+
+        const newScore = this.finalScore > previousBestScore;
+        const newDistance = this.finalDistance > previousBestDistance;
+
+        const bestScore = Math.max(this.finalScore, previousBestScore);
+        const bestDistance = Math.max(
+          this.finalDistance,
+          previousBestDistance
+        );
+
+        if (newScore) {
+          Storage.set(CONFIG.STORAGE.BEST_SCORE, bestScore);
+        }
+
+        if (newDistance) {
+          Storage.set(CONFIG.STORAGE.BEST_DISTANCE, bestDistance);
+        }
+
+        this.add.text(
+          CONFIG.WIDTH / 2,
+          75,
+          "GAME OVER",
+          {
+            fontFamily: "Impact, Arial Black, sans-serif",
+            fontSize: "58px",
+            color: "#ff4d4d",
+            stroke: "#240402",
+            strokeThickness: 10
+          }
+        ).setOrigin(0.5).setDepth(30);
+
+        /*
+         * GAME OVER IMAGE
+         *
+         * Uses assets/gameover.png if it exists.
+         * Otherwise, the placeholder hero image is shown.
+         */
+        const imageKey = this.textures.exists("gameover_image")
+          ? "gameover_image"
+          : "hero";
+
+        const imageContainer = this.add.container(
+          CONFIG.WIDTH / 2,
+          205
+        ).setDepth(30);
+
+        const imageFrame = this.add.rectangle(
+          0, 0, 150, 150, 0x1a0805
+        ).setStrokeStyle(4, 0xffb703);
+
+        const image = this.add.image(0, 0, imageKey);
+
+        // Fit the image inside the frame without stretching it.
+        const imageScale = Math.min(
+          138 / image.width,
+          138 / image.height
+        );
+
+        image.setScale(imageScale);
+
+        imageContainer.add([imageFrame, image]);
+        imageContainer.setScale(0);
+
+        this.tweens.add({
+          targets: imageContainer,
+          scale: 1,
+          duration: 380,
+          ease: "Back.easeOut"
+        });
+
+        /*
+         * CUSTOM MESSAGE
+         *
+         * Change GAMEOVER_MESSAGE in CONFIG to change this text.
+         */
+        this.add.text(
+          CONFIG.WIDTH / 2,
+          315,
+          CONFIG.GAMEOVER_MESSAGE,
+          {
+            fontFamily: "Impact, Arial, sans-serif",
+            fontSize: "23px",
+            color: "#ffd166",
+            stroke: "#000000",
+            strokeThickness: 5,
+            align: "center",
+            wordWrap: { width: 460 }
+          }
+        ).setOrigin(0.5).setDepth(30);
+
+        if (newScore || newDistance) {
+          const badge = this.add.text(
+            CONFIG.WIDTH / 2,
+            365,
+            "★ NEW BEST! ★",
+            {
+              fontFamily: "Impact, Arial Black, sans-serif",
+              fontSize: "24px",
+              color: "#2b0904",
+              backgroundColor: "#ffb703",
+              padding: { x: 14, y: 5 }
+            }
+          ).setOrigin(0.5).setDepth(31).setScale(0);
+
+          this.tweens.add({
+            targets: badge,
+            scale: 1,
+            duration: 400,
+            delay: 150,
+            ease: "Back.easeOut"
+          });
+        }
+
+        // Results panel
+        this.add.rectangle(
+          CONFIG.WIDTH / 2,
+          525,
+          420,
+          250,
+          0x1a0805,
+          0.92
+        ).setStrokeStyle(4, 0xffb703).setDepth(25);
+
+        const resultStyle = {
+          fontFamily: "Impact, Arial, sans-serif",
+          fontSize: "31px",
+          color: "#ffffff",
+          stroke: "#000000",
+          strokeThickness: 5
+        };
+
+        const bestStyle = {
+          fontFamily: "Impact, Arial, sans-serif",
+          fontSize: "26px",
+          color: "#ffd166",
+          stroke: "#000000",
+          strokeThickness: 4
+        };
+
+        this.add.text(
+          CONFIG.WIDTH / 2, 440,
+          `Score: ${this.finalScore}`,
+          resultStyle
+        ).setOrigin(0.5).setDepth(30);
+
+        this.add.text(
+          CONFIG.WIDTH / 2, 485,
+          `Distance: ${this.finalDistance} m`,
+          resultStyle
+        ).setOrigin(0.5).setDepth(30);
+
+        this.add.rectangle(
+          CONFIG.WIDTH / 2, 525, 340, 2, 0xffb703, 0.6
+        ).setDepth(30);
+
+        this.add.text(
+          CONFIG.WIDTH / 2, 565,
+          `Best Score: ${bestScore}`,
+          bestStyle
+        ).setOrigin(0.5).setDepth(30);
+
+        this.add.text(
+          CONFIG.WIDTH / 2, 607,
+          `Best Distance: ${bestDistance} m`,
+          bestStyle
+        ).setOrigin(0.5).setDepth(30);
+
+        addButton(
+          this,
+          CONFIG.WIDTH / 2,
+          725,
+          "RESTART",
+          () => this.restartGame()
+        );
+
+        this.add.text(
+          CONFIG.WIDTH / 2,
+          785,
+          "Tap Restart or press SPACE",
+          {
+            fontFamily: "Arial, sans-serif",
+            fontSize: "17px",
+            color: "#ffe6a7",
+            stroke: "#000000",
+            strokeThickness: 3
+          }
+        ).setOrigin(0.5).setDepth(30);
+
+        addMuteButton(this);
+        addFooter(this);
+
+        // Prevent an accidental last flap from immediately restarting.
+        this.time.delayedCall(250, () => {
+          this.canRestart = true;
+        });
+
+        if (this.input.keyboard) {
+          this.input.keyboard.on("keydown-SPACE", event => {
+            if (!event.repeat) this.restartGame();
+          });
+        }
+      }
+
+      restartGame() {
+        if (!this.canRestart || this.transitioning) return;
+
+        AudioManager.startMusic();
+        fadeToScene(this, "GameScene");
+      }
+
+      update(time, delta) {
+        scrollBackground(this.background, 60 * delta / 1000);
+      }
+    }
+
+    /*
+     * ================================================================
+     * CREATE THE PHASER GAME
+     * ================================================================
+     */
+    const game = new Phaser.Game({
+      type: Phaser.AUTO,
+      parent: "game-container",
+
+      width: CONFIG.WIDTH,
+      height: CONFIG.HEIGHT,
+
+      backgroundColor: "#160811",
+
+      scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH
+      },
+
+      physics: {
+        default: "arcade",
+        arcade: {
+          debug: false
+        }
+      },
+
+      render: {
+        antialias: true,
+        pixelArt: false
+      },
+
+      scene: [
+        BootScene,
+        MenuScene,
+        GameScene,
+        GameOverScene
+      ]
+    });
+
+    /*
+     * Handle audio from the original browser gesture.
+     *
+     * Using document-level listeners means a flap sound is requested on
+     * every tap/click and every non-repeating Space press, including taps
+     * on buttons. Separate sound instances allow overlapping playback.
+     */
+    function handleAudioGesture() {
+      AudioManager.unlock();
+      AudioManager.playFlap();
+
+      if (
+        game.scene.isActive("MenuScene") ||
+        (
+          game.scene.isActive("GameScene") &&
+          !game.scene.getScene("GameScene").dead
+        )
+      ) {
+        AudioManager.startMusic();
+      }
+    }
+
+    document.addEventListener("pointerdown", handleAudioGesture, true);
+
+    document.addEventListener("keydown", event => {
+      if (event.code === "Space") {
+        event.preventDefault();
+
+        if (!event.repeat) {
+          handleAudioGesture();
+        }
+      }
+    }, true);
+
+    // Prevent mobile browser gestures from scrolling or zooming the page.
+    document.addEventListener("gesturestart", event => {
+      event.preventDefault();
+    }, { passive: false });
+
+    document.addEventListener("dblclick", event => {
+      event.preventDefault();
+    }, { passive: false });
+  </script>
+</body>
+</html>
